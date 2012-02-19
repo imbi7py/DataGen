@@ -2,9 +2,12 @@
 import boto
 import gzip
 import math
+import multiprocessing
 import md5
+import os
+import Queue
 import random
-import string
+import sys
 
 def md5Digest(filePath):
   infile = open(filePath, 'rb')
@@ -49,11 +52,35 @@ def makeRandomFile(numLines, outputFilePath, s3Bucket, s3Prefix):
   key.key = s3Prefix + "/" + outputFilePath
   digest=key.get_md5_from_hexdigest(md5Digest(outputFilePath))
   key.set_contents_from_filename(outputFilePath, md5=digest)
+  os.remove(outputFilePath)
 
-    
-    
+def processWork(queue):
+  while True:
+    try:
+      (numLines, outputFilePath, bucket, prefix) = queue.get(True, 3)
+    except Queue.Empty:
+      continue
+    if numLines == 0:
+      queue.task_done()
+      return
+    makeRandomFile(numLines, outputFilePath + ".gz", bucket, prefix)
+    queue.task_done()
+    print "Finished processing {}".format(outputFilePath)
+
+def run(numLines, numFiles, outputFilePath, bucket, prefix):
+  print "Lines: {}, Files: {}, Base Name: {}, Bucket: {}, Prefix: {}".format(numLines, numFiles, outputFilePath, bucket, prefix)
+  queue = multiprocessing.JoinableQueue(100)
+  for i in xrange(0,10):
+    p = multiprocessing.Process(target=processWork, args=(queue,))
+    p.start()
+  for i in xrange(0, numFiles):
+    queue.put((numLines, outputFilePath + "." + str(i), bucket, prefix))
+  for i in xrange(0, 10):
+    queue.put((0,"","",""))
+  queue.close()
+  queue.join()
+  print "Done processing"
+  sys.exit(0)
 
 if __name__ == '__main__':
-  numLines = sys.argv[0]
-  outputFilePath = sys.argv[1]
-  makeRandomFile(numLines, outputFilePath, "mock-test", "outputbillions")
+  run(long(sys.argv[1]), long(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5])
