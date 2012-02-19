@@ -45,7 +45,7 @@ def makeRandomFile(numLines, outputFilePath, s3Bucket, s3Prefix):
     l = math.sqrt(seed5)
     m = seed7
     n = seed7 * seed1
-    outString = "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(a,b,c,d,e,f,g,h,i,j,k,l,m,n)
+    outString = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}\t{11}\t{12}\t{13}\n".format(a,b,c,d,e,f,g,h,i,j,k,l,m,n)
     outfile.write(outString)
   outfile.close()
   key = boto.s3.key.Key(bucket)
@@ -65,10 +65,10 @@ def processWork(queue):
       return
     makeRandomFile(numLines, outputFilePath + ".gz", bucket, prefix)
     queue.task_done()
-    print "Finished processing {}".format(outputFilePath)
+    print "Finished processing {0}".format(outputFilePath)
 
 def run(numLines, numFiles, outputFilePath, bucket, prefix):
-  print "Lines: {}, Files: {}, Base Name: {}, Bucket: {}, Prefix: {}".format(numLines, numFiles, outputFilePath, bucket, prefix)
+  print "Lines: {0}, Files: {1}, Base Name: {2}, Bucket: {3}, Prefix: {4}".format(numLines, numFiles, outputFilePath, bucket, prefix)
   queue = multiprocessing.JoinableQueue(100)
   for i in xrange(0,10):
     p = multiprocessing.Process(target=processWork, args=(queue,))
