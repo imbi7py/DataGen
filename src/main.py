@@ -103,7 +103,7 @@ class GzipStreamFile(object):
     # select should almost always return immediately and may not actually
     # be neceessary.
     if not abandon:
-      rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 0)
+      rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 1)
       if rd:
         comp_data = self.pipe_r.read()
         self.out_hook(comp_data)
