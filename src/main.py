@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 import gzip
-import math
 import multiprocessing
-import hashlib, md5 #TODO: remove md5, it's just here for demonstration
+import hashlib
 import os
-import Queue
 import random
 import sys
+import time
 
 import fcntl
 import errno
@@ -14,9 +13,13 @@ import select
 
 from functools import wraps
 
-MP_ENABLED = False
-MAX_WORKERS = 10
-COMP_LEVEL = 9
+from folding_constants import make_constants # around 2% speed boost
+
+MP_ENABLED = True
+MAX_WORKERS = 2  # hard to beat one per core
+COMP_LEVEL = 1   # comp_level 1 ~0.48 ratio, comp_level 9 ~0.45
+                 # comp_level 1 speed 15.8k lines/s 
+                 # comp_level 9 speed 11.2k lines/s (2 workers)
 
 if __name__ == '__main__' and len(sys.argv) > 4:
   S3_BUCKET = 'mock-test' # sys.argv[4] #TODO, found it this way, i think
@@ -56,17 +59,6 @@ def save_to_s3(s3_prefix, s3_bucket):
     return g
   return decorator
 
-#TODO: not needed
-def md5Digest(filePath):
-  infile = open(filePath, 'rb')
-  checksum = md5.new()
-  data = infile.read(1024 * 1024)
-  while len(data) > 0:
-    checksum.update(data)
-    data = infile.read(1024 * 1024)
-  infile.close()
-  return checksum.hexdigest()
-
 class GzipStreamFile(object):
   def __init__(self, filename, comp_level=9, out_hook=None):
     if out_hook and not callable(out_hook):
@@ -85,6 +77,8 @@ class GzipStreamFile(object):
     self.comp_bytes_written = 0
 
   def write(self, data):
+    comp_bytes_written = 0
+
     self.bytes_written += self.gzip_pipe.write(data)
     try:
       comp_data = self.pipe_r.read()
@@ -92,25 +86,30 @@ class GzipStreamFile(object):
 
       comp_bytes_written = len(comp_data)
       self.comp_bytes_written += comp_bytes_written
-      return comp_bytes_written
     except IOError as ioe:
-      if ioe.errno == errno.EAGAIN:
-        return 0
-      else:
+      if not ioe.errno == errno.EAGAIN:
         raise
 
+    return comp_bytes_written
+
+  # no need to maintain internal 'closed' state; all the objects used 
+  # already guard that for us!
   def close(self, abandon=False):
+    comp_bytes_written = 0
+
     self.gzip_pipe.close()
 
     # This is being extra cautious. The close() above should flush and this
     # select should almost always return immediately and may not actually
     # be neceessary.
     if not abandon:
-      rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 1)
+      rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 0)
       if rd:
         comp_data = self.pipe_r.read()
         self.out_hook(comp_data)
         self.outfile.write(comp_data)
+        comp_bytes_written = len(comp_data)
+        self.comp_bytes_written += comp_bytes_written
 
     self.pipe_w.close()
     self.pipe_r.close()
@@ -125,7 +124,10 @@ class GzipStreamFile(object):
     # to close the gzip_pipe to flush it and make a new one.
 
 @save_to_s3(S3_PREFIX, S3_BUCKET)
+@make_constants()
 def makeRandomFile(numLines, outputFilePath, hash_type='md5', comp_level=9):
+  start = time.time()
+
   random.seed()
 
   hashemi = hashlib.__dict__.get(hash_type)()
@@ -161,8 +163,10 @@ def makeRandomFile(numLines, outputFilePath, hash_type='md5', comp_level=9):
     gzip_file.write(outline)
   
   gzip_file.close()
-  print 'os:', os.path.getsize(outputFilePath), ' gzip_file:',gzip_file.comp_bytes_written
-  return hashemi.hexdigest(), gzip_file.bytes_written, gzip_file.comp_bytes_written
+  
+  end = time.time()
+  #print 'os:', os.path.getsize(outputFilePath), ' gzip_file:',gzip_file.comp_bytes_written # could assert
+  return hashemi.hexdigest(), gzip_file.bytes_written, gzip_file.comp_bytes_written, (end-start)
 
 def div_rounded(x,y,prec=3):
   if y == 0: return 0
@@ -175,22 +179,24 @@ def file_complete():
   counter         = 0
   total_size      = 0
   total_comp_size = 0
+  total_time      = 0
   
   try:
     total_files = (yield)
     while True:
-      ret = (yield counter, total_size, total_comp_size)
+      ret = (yield counter, total_size, total_comp_size, total_time)
       if ret:
-        hash_digest, size, comp_size = ret
+        hash_digest, size, comp_size, exec_time = ret
         counter   += 1
         ratio      = div_rounded(comp_size, size)
         percent    = div_rounded(counter, total_files)
-        print ("[{percent:>4.0%}]  Process #{counter} complete. Hash: {hash_digest}\n"
+        print ("[{percent:>4.0%}]  Process #{counter} complete. ({exec_time:.2f} s) Hash: {hash_digest}\n"
                "        Compressed: {comp_size}  Uncompressed: {size}"
                "  Ratio: {ratio}").format(**locals())
 
         total_size      += size
         total_comp_size += comp_size
+        total_time      += exec_time
         
   finally:
     pass # cleanup can go here.
@@ -213,6 +219,7 @@ def run(numLines, numFiles, outputFilePath, use_mp=True, max_workers=10, hash_ty
               }
             
     if use_mp:
+      #time.sleep(0.3) #somewhat expected, but staggering doesn't seem to affect performance.
       pool.apply_async(makeRandomFile,
                        kwds=kwargs,
                        callback=callback.send)
@@ -224,15 +231,17 @@ def run(numLines, numFiles, outputFilePath, use_mp=True, max_workers=10, hash_ty
     pool.join()
 
   final_stats = callback.next()
-  done_count, total_size, total_comp_size = final_stats
-  ratio = div_rounded(total_comp_size, total_size)
+  done_count, total_size, total_comp_size, total_time = final_stats
+  ratio = total_comp_size/(total_size+0.0)
+  rate  = numLines*numFiles/total_time
+  
 
   print
   print
   print "Done."
   print
-  print ("Wrote {done_count} files, {total_comp_size} bytes ({total_size} bytes "
-         "uncompressed. Ratio: {ratio}).").format(**locals())
+  print ("Generated {done_count} files in {total_time:.2f} seconds ({rate:.3f} lines/second),\n"
+         "{total_comp_size} bytes ({total_size} bytes uncompressed. Ratio: {ratio:.3f}).").format(**locals())
   print
 
   return
