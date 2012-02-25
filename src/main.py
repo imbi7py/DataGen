@@ -1,13 +1,59 @@
 #!/usr/bin/env python
-import boto
 import gzip
 import math
 import multiprocessing
-import md5
+import hashlib, md5 #TODO: remove md5, it's just here for demonstration
 import os
 import Queue
 import random
 import sys
+
+from functools import wraps
+
+MAX_WORKERS = 10
+
+if __name__ == '__main__' and len(sys.argv) > 4:
+  S3_BUCKET = sys.argv[4]
+  S3_PREFIX = sys.argv[5]
+else:
+  S3_BUCKET = None # or some other defaults
+  S3_PREFIX = None
+
+S3_ENABLED = True
+try:
+  import boto
+except ImportError as ie:
+  S3_ENABLED = False
+
+if S3_ENABLED:
+  # a decorator for saving to s3. could probably be enhanced
+  def save_to_s3(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+      s3_prefix = S3_PREFIX
+      s3_bucket = S3_BUCKET or 'mock-test'
+      assert s3_prefix and s3_bucket
+
+      s3 = boto.connect_s3()
+      bucket = boto.s3.bucket.Bucket(s3, s3_bucket)
+      output_path = kwargs.get('outputFilePath') or args[1]
+      # TODO: better pattern for the above?
+      
+      md5_digest = f(*args, **kwargs)
+      
+      key = boto.s3.key.Key(bucket)
+      key.key = s3_prefix + "/" + output_path
+      digest = key.get_md5_from_hexdigest(md5_digest)
+      key.set_contents_from_filename(output_path, md5=digest)
+      os.remove(output_path)
+
+      return md5_digest
+    return wrapper
+else:
+  # dummy wrapper
+  def save_to_s3(f):
+    return f
+
 
 def md5Digest(filePath):
   infile = open(filePath, 'rb')
@@ -19,11 +65,13 @@ def md5Digest(filePath):
   infile.close()
   return checksum.hexdigest()
 
-def makeRandomFile(numLines, outputFilePath, s3Bucket, s3Prefix):
+@save_to_s3
+def makeRandomFile(numLines, outputFilePath, hashtype='md5'):
   random.seed()
-  s3 = boto.connect_s3()
-  bucket = boto.s3.bucket.Bucket(s3, "mock-test")
+
   outfile = gzip.open(outputFilePath, 'wb')
+  hashemi = hashlib.__dict__.get(hashtype)
+
   for i in xrange(0,numLines):
     seed1 = random.randint(0,2**32-1)
     seed2 = random.randint(-2**31,2**31-1)
@@ -32,27 +80,34 @@ def makeRandomFile(numLines, outputFilePath, s3Bucket, s3Prefix):
     seed5 = random.random()
     seed6 = random.random()
     seed7 = random.randint(-127,128)
-    a = seed1
-    b = seed2
-    c = seed3
-    d = seed4
-    e = seed5
-    f = seed6
-    g = seed1 * seed1
-    h = seed5 * seed6
-    j = -seed1
-    k = -seed3
-    l = math.sqrt(seed5)
-    m = seed7
-    n = seed7 * seed1
-    outString = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}\t{11}\t{12}\t{13}\n".format(a,b,c,d,e,f,g,h,i,j,k,l,m,n)
-    outfile.write(outString)
+    
+    vals = ( seed1,
+             seed2,
+             seed3,
+             seed4,
+             seed5,
+             seed6,
+             seed1 ** 2,
+             seed5 * seed6,
+             -seed1,
+             -seed3,
+             seed5 ** 0.5,
+             seed7,
+             seed7 * seed1
+             )
+
+    #outString = "{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t{6}\t{7}\t{8}\t{9}\t{10}\t{11}\t{12}\t{13}\n".format(a,b,c,d,e,f,g,h,i,j,k,l,m,n)
+    # alt to above ^
+    # outString = "{a}\t{b}\t{c}\n".format(**locals())
+    outline = "\t".join(str(v) for v in vals)+"\n"
+    hashemi.update(outline)
+    outfile.write(outline)
+  
   outfile.close()
-  key = boto.s3.key.Key(bucket)
-  key.key = s3Prefix + "/" + outputFilePath
-  digest=key.get_md5_from_hexdigest(md5Digest(outputFilePath))
-  key.set_contents_from_filename(outputFilePath, md5=digest)
-  os.remove(outputFilePath)
+
+  md5_digest = hashemi.hexdigest()
+
+  return md5_digest
 
 def processWork(queue):
   while True:
@@ -67,20 +122,18 @@ def processWork(queue):
     queue.task_done()
     print "Finished processing {0}".format(outputFilePath)
 
-def run(numLines, numFiles, outputFilePath, bucket, prefix):
-  print "Lines: {0}, Files: {1}, Base Name: {2}, Bucket: {3}, Prefix: {4}".format(numLines, numFiles, outputFilePath, bucket, prefix)
-  queue = multiprocessing.JoinableQueue(100)
-  for i in xrange(0,10):
-    p = multiprocessing.Process(target=processWork, args=(queue,))
-    p.start()
-  for i in xrange(0, numFiles):
-    queue.put((numLines, outputFilePath + "." + str(i), bucket, prefix))
-  for i in xrange(0, 10):
-    queue.put((0,"","",""))
-  queue.close()
-  queue.join()
+def run(numLines, numFiles, outputFilePath):
+  print "Lines: {0}, Files: {1}, Base Name: {2}, Bucket: {3}, Prefix: {4}".format(numLines, numFiles, outputFilePath, S3_BUCKET, S3_PREFIX)
+
+  pool = multiprocessing.Pool(min(MAX_WORKERS, numFiles))
+
+  for i in range(numFiles):
+    pool.apply_async(makeRandomFile, (numLines, outputFilePath + "." + str(i) + '.tsv.gzip'))
+
+  pool.close()
+  pool.join()
   print "Done processing"
   sys.exit(0)
 
 if __name__ == '__main__':
-  run(long(sys.argv[1]), long(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5])
+  run(int(sys.argv[1]), int(sys.argv[2]), sys.argv[3])
