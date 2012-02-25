@@ -1,0 +1,11 @@
+# emacs
+\#*
+.\#*
+*~
+
+# python
+*.pyc
+
+# project-specific
+*.tsv
+*.tsv.gz
