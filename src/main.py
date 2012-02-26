@@ -16,7 +16,7 @@ from functools import wraps
 from folding_constants import make_constants # around 2% speed boost
 
 MP_ENABLED = True
-MAX_WORKERS = 2  # hard to beat one per core
+MAX_WORKERS = multiprocessing.cpu_count()  # _really_ hard to beat one per core
 COMP_LEVEL = 1   # comp_level 1 ~0.48 ratio, comp_level 9 ~0.45
                  # comp_level 1 speed 15.8k lines/s 
                  # comp_level 9 speed 11.2k lines/s (2 workers)
@@ -85,7 +85,7 @@ class GzipStreamFile(object):
     try:
       comp_data = self.pipe_r.read()
       self.outfile.write(comp_data)
-      self.out_hook(comp_data)
+      self.out_hook or self.out_hook(comp_data)
       comp_bytes_written = len(comp_data)
       self.comp_bytes_written += comp_bytes_written
     except IOError as ioe:
@@ -110,7 +110,7 @@ class GzipStreamFile(object):
         rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 1.0)
         if rd:
           comp_data = self.pipe_r.read()
-          self.out_hook(comp_data)
+          self.out_hook or self.out_hook(comp_data)
           self.outfile.write(comp_data)
           comp_bytes_written = len(comp_data)
           self.comp_bytes_written += comp_bytes_written
@@ -212,6 +212,8 @@ def file_complete():
     pass # cleanup can go here.
 
 def run(numLines, numFiles, outputFilePath, use_mp=True, max_workers=10, hash_type='md5', comp_level=9):
+  wc_time_s = time.time()
+
   print "Lines: {0}, Files: {1}, Base Name: {2}, Bucket: {3}, Prefix: {4}".format(numLines, numFiles, outputFilePath, S3_BUCKET, S3_PREFIX)
 
   callback = file_complete()
@@ -243,15 +245,23 @@ def run(numLines, numFiles, outputFilePath, use_mp=True, max_workers=10, hash_ty
   final_stats = callback.next()
   done_count, total_size, total_comp_size, total_time = final_stats
   ratio = total_comp_size/(total_size+0.0) if total_size else 0
-  rate  = numLines*numFiles/total_time if total_time else 0
-  
 
+  total_lines = done_count * numLines
+  avg_rate  = total_lines/total_time if total_time else 0
+
+  wc_time_e = time.time()
+  wc_total_time = wc_time_e - wc_time_s
+  speedup = total_time/wc_total_time if wc_total_time else 0
+  total_rate = total_lines/wc_total_time if wc_total_time else 0
   print
   print
   print "Done."
   print
-  print ("Generated {done_count} files in {total_time:.2f} seconds ({rate:.3f} lines/second),\n"
-         "{total_comp_size} bytes ({total_size} bytes uncompressed. Ratio: {ratio:.3f}).").format(**locals())
+  print ("Generated {total_lines} lines in {done_count} files in {wc_total_time:.2f} seconds "
+         "({total_rate:.3f} lines/second).\n"
+         "Cumulative generation time: {total_time:.2f} seconds (Average {avg_rate:.3f} lines/second).\n"
+         "Total Speedup: {speedup:.3f}x.\n"
+         "{total_comp_size} bytes ({total_size} bytes uncompressed. Ratio: {ratio:.3f}).\n").format(**locals())
   print
 
   return
