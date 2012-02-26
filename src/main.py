@@ -81,7 +81,7 @@ class GzipStreamFile(object):
   def write(self, data):
     comp_bytes_written = 0
 
-    self.bytes_written += self.gzip_pipe.write(data)
+    self.bytes_written += self.gzip_pipe.write(data) or 0
     try:
       comp_data = self.pipe_r.read()
       self.outfile.write(comp_data)
