@@ -47,15 +47,17 @@ def save_to_s3(s3_prefix, s3_bucket):
       output_path = kwargs.get('outputFilePath') or args[1]
       # TODO: better pattern for the above?
       
-      md5_digest, _, _ = f(*args, **kwargs)
+      ret = f(*args, **kwargs)
       
+      md5_digest = ret[0]
+
       key = boto.s3.key.Key(bucket)
       key.key = s3_prefix + "/" + output_path
       digest = key.get_md5_from_hexdigest(md5_digest)
       key.set_contents_from_filename(output_path, md5=digest)
       os.remove(output_path)
         
-      return md5_digest
+      return ret
     return g
   return decorator
 
