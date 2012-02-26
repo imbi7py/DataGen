@@ -72,7 +72,7 @@ class GzipStreamFile(object):
 
     self.gzip_pipe = gzip.GzipFile(fileobj=self.pipe_w, compresslevel=comp_level)
     self.outfile = open(filename, 'wb')
-
+    
     self.bytes_written = 0
     self.comp_bytes_written = 0
 
@@ -83,7 +83,7 @@ class GzipStreamFile(object):
     try:
       comp_data = self.pipe_r.read()
       self.outfile.write(comp_data)
-
+      self.out_hook(comp_data)
       comp_bytes_written = len(comp_data)
       self.comp_bytes_written += comp_bytes_written
     except IOError as ioe:
@@ -103,13 +103,21 @@ class GzipStreamFile(object):
     # select should almost always return immediately and may not actually
     # be neceessary.
     if not abandon:
-      rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 1)
-      if rd:
-        comp_data = self.pipe_r.read()
-        self.out_hook(comp_data)
-        self.outfile.write(comp_data)
-        comp_bytes_written = len(comp_data)
-        self.comp_bytes_written += comp_bytes_written
+      #while not comp_bytes_written:
+      try:
+        rd,_,_ = select.select([self.pipe_r],[],[self.pipe_r], 1.0)
+        if rd:
+          comp_data = self.pipe_r.read()
+          self.out_hook(comp_data)
+          self.outfile.write(comp_data)
+          comp_bytes_written = len(comp_data)
+          self.comp_bytes_written += comp_bytes_written
+      except IOError as ioe:
+        raise
+          #if ioe.errno == errno.EAGAIN:
+          #  break
+            #time.sleep(0.02)
+            #continue
 
     self.pipe_w.close()
     self.pipe_r.close()
@@ -232,8 +240,8 @@ def run(numLines, numFiles, outputFilePath, use_mp=True, max_workers=10, hash_ty
 
   final_stats = callback.next()
   done_count, total_size, total_comp_size, total_time = final_stats
-  ratio = total_comp_size/(total_size+0.0)
-  rate  = numLines*numFiles/total_time
+  ratio = total_comp_size/(total_size+0.0) if total_size else 0
+  rate  = numLines*numFiles/total_time if total_time else 0
   
 
   print
